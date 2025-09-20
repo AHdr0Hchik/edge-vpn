@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+enum PaymentStatus {
+  SUCCEEDED
+  PENDING
+  FAILED
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String
+  createdAt     DateTime       @default(now())
+  devices       Device[]
+  subscriptions Subscription[]
+}
+
+model Device {
+  id            String            @id
+  name          String?
+  owner         User              @relation(fields: [ownerId], references: [id])
+  ownerId       String
+  secretHash    String
+  publicKey     String?
+  vpnEnabled    Boolean           @default(true)
+  lastSeen      DateTime?
+  speedTier     SpeedTier?        @relation(fields: [speedTierId], references: [id])
+  speedTierId   String?
+  bypassDomains BypassDomain[]
+  peer          VpnPeer?
+  heartbeats    DeviceHeartbeat[]
+  createdAt     DateTime          @default(now())
+
+  subscriptions Subscription[]
+
+  @@index([ownerId])
+  @@index([lastSeen])
+}
+
+model SpeedTier {
+  id            String         @id @default(uuid())
+  name          String         @unique
+  rateMbps      Int
+  priceCents    Int
+  devices       Device[]
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  user             User               @relation(fields: [userId], references: [id])
+  userId           String
+  device           Device             @relation(fields: [deviceId], references: [id])
+  deviceId         String
+  speedTier        SpeedTier          @relation(fields: [speedTierId], references: [id])
+  speedTierId      String
+  status           SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd DateTime
+  createdAt        DateTime           @default(now())
+
+  payments Payment[]
+
+  @@index([userId, deviceId])
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  subscription   Subscription  @relation(fields: [subscriptionId], references: [id])
+  subscriptionId String
+  amountCents    Int
+  status         PaymentStatus
+  createdAt      DateTime      @default(now())
+}
+
+model VpnServer {
+  id          String    @id @default(uuid())
+  name        String
+  location    String?
+  endpoint    String // host:port (UDP)
+  publicKey   String // WG server pubkey (base64)
+  apiUrl      String // URL агента gw (http/https)
+  apiToken    String // токен доступа к агенту gw
+  wgInterface String    @default("wg0")
+  ipPoolCidr  String // например 10.200.0.0/24
+  enabled     Boolean   @default(true)
+  peers       VpnPeer[]
+  createdAt   DateTime  @default(now())
+
+  @@index([enabled])
+}
+
+model VpnPeer {
+  id          String    @id @default(uuid())
+  device      Device    @relation(fields: [deviceId], references: [id])
+  deviceId    String    @unique
+  server      VpnServer @relation(fields: [serverId], references: [id])
+  serverId    String
+  addressCidr String // 10.200.0.X/32
+  rateMbps    Int       @default(40)
+  createdAt   DateTime  @default(now())
+
+  @@unique([serverId, addressCidr])
+  @@index([serverId])
+}
+
+model BypassDomain {
+  id        String   @id @default(uuid())
+  device    Device   @relation(fields: [deviceId], references: [id])
+  deviceId  String
+  domain    String
+  createdAt DateTime @default(now())
+
+  @@unique([deviceId, domain])
+  @@index([deviceId])
+}
+
+model DeviceHeartbeat {
+  id       String   @id @default(uuid())
+  device   Device   @relation(fields: [deviceId], references: [id])
+  deviceId String
+  at       DateTime @default(now())
+  data     Json
+
+  @@index([deviceId, at])
+}
