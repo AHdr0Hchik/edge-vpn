@@ -79,6 +79,41 @@ app.get('/api/devices', requireAuth, async (req, res) => {
   })));
 });
 
+app.post('/api/devices/:id/vpn', requireAuth, async (req, res) => {
+  const schema = z.object({ enabled: z.boolean() });
+  const { enabled } = schema.parse(req.body);
+  const dev = await findUserDevice(req);
+  if (!dev) return res.status(404).json({ error: 'not found' });
+  await prisma.device.update({ where: { id: dev.id }, data: { vpnEnabled: enabled } });
+  await pushPolicy(dev.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/devices/:id/bypass-domains', requireAuth, async (req, res) => {
+  const dev = await findUserDevice(req);
+  if (!dev) return res.status(404).json({ error: 'not found' });
+  const domains = await prisma.bypassDomain.findMany({ where: { deviceId: dev.id } });
+  res.json(domains.map(d => d.domain));
+});
+
+app.post('/api/devices/:id/bypass-domains', requireAuth, async (req, res) => {
+  const schema = z.object({ domains: z.array(z.string()).max(200) });
+  const { domains } = schema.parse(req.body);
+  const dev = await findUserDevice(req);
+  if (!dev) return res.status(404).json({ error: 'not found' });
+  const list = sanitizeDomains(domains);
+  await prisma.$transaction([
+    prisma.bypassDomain.deleteMany({ where: { deviceId: dev.id } }),
+    ...(list.length
+      ? [prisma.bypassDomain.createMany({
+          data: list.map(domain => ({ deviceId: dev.id, domain }))
+        })]
+      : [])
+  ]);
+  await pushPolicy(dev.id);
+  res.json({ ok: true, count: list.length });
+});
+
 /* ================= Admin APIs ================= */
 
 // Добавить VPN-сервер (шлюз)
@@ -233,6 +268,7 @@ wss.on('connection', (ws: WebSocket, _req: any, deviceId: string) => {
 
         // Пуш профиля
         await pushProfile(deviceId, peer);
+        await pushPolicy(deviceId);
       } else if (msg.type === 'heartbeat') {
         await prisma.device.update({ where: { id: deviceId }, data: { lastSeen: new Date() } }).catch(() => {});
         await prisma.deviceHeartbeat.create({ data: { deviceId, data: msg.data || {} } }).catch(() => {});
@@ -265,6 +301,42 @@ async function pushProfile(deviceId: string, peer?: any) {
   const sent = pushTo(deviceId, payload);
   if (sent) logger.info({ deviceId }, 'profile pushed');
   else logger.warn({ deviceId }, 'profile push failed (no WS)');
+}
+
+async function findUserDevice(req: express.Request) {
+  const userId = (req as any).userId as string;
+  const id = req.params.id;
+  return prisma.device.findFirst({ where: { id, ownerId: userId } });
+}
+
+function sanitizeDomains(domains: string[]): string[] {
+  const out = new Set<string>();
+  for (const d of domains) {
+    const s = (d || '').trim().toLowerCase();
+    if (!s) continue;
+    // примитивная проверка FQDN: буквы/цифры/дефис/точки, минимум одна точка
+    if (!/^[a-z0-9.-]+$/.test(s) || s.indexOf('.') < 0) continue;
+    out.add(s);
+  }
+  return Array.from(out).slice(0, 200);
+}
+
+async function pushPolicy(deviceId: string) {
+  const dev = await prisma.device.findUnique({
+    where: { id: deviceId },
+    include: { bypassDomains: true }
+  });
+  if (!dev) return;
+  const payload = {
+    type: 'action',
+    action: 'policy',
+    data: {
+      vpnEnabled: dev.vpnEnabled,
+      bypassDomains: dev.bypassDomains.map(b => b.domain)
+    }
+  };
+  const sent = pushTo(deviceId, payload);
+  if (!sent) logger.warn({ deviceId }, 'policy push skipped (no WS)');
 }
 
 server.listen(PORT, () => logger.info(`Server listening on ${PORT}`));
