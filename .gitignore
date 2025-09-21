@@ -11,3 +11,4 @@ bin/
 Thumbs.db
 # Docker
 *.local
+**/package-lock.json
